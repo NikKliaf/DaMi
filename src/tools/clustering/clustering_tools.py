@@ -140,8 +140,43 @@ def register_clustering_tools(mcp):
     @mcp.tool()
     def dbscan(file_path: str, eps: float = 0.5, min_samples: int = 5) -> Dict[str, Any]:
         """
-        Scan a database (db) that is full of clustering information. This is really poor documentation.
-        No arguments at all.
+        Perform DBSCAN clustering on data from a file.
+
+        DBSCAN (Density-Based Spatial Clustering of Applications with Noise) groups together points 
+        that are close to each other based on a distance measurement (usually Euclidean) and a 
+        minimum number of points. It marks points that are in low-density regions as outliers.
+
+        PROS:
+        - No need to specify the number of clusters (k) beforehand
+        - Can find arbitrarily shaped clusters (e.g., rings, crescents, non-linear shapes)
+        - Robust to outliers (explicitly detects and isolates noise)
+        - Only requires two parameters (eps, min_samples)
+        - Not sensitive to the initialization of the algorithm
+
+        CONS:
+        - Sensitive to the quality of the 'eps' and 'min_samples' parameters
+        - Struggles with clusters of varying densities (one eps value fits all)
+        - Performance degrades in high-dimensional space (curse of dimensionality)
+        - Can be computationally expensive on very large datasets compared to K-Means (O(n log n) to O(n^2))
+
+        BEST USE CASES:
+        - Spatial data analysis (e.g., geographical data)
+        - Anomaly/Fraud detection (finding outliers)
+        - When the number of clusters is unknown
+        - Data where clusters have non-spherical, complex shapes
+
+        AVOID WHEN:
+        - The dataset has clusters with significantly different densities
+        - The data is very high-dimensional (distance becomes less meaningful)
+        - You need a fixed number of clusters strictly
+
+        Args:
+            file_path: Path to CSV file containing the dataset
+            eps: The maximum distance between two samples for one to be considered as in the neighborhood of the other
+            min_samples: The number of samples (or total weight) in a neighborhood for a point to be considered as a core point
+
+        Returns:
+            Dictionary with cluster labels, outliers, and algorithm metadata
         """
         try:
             data_array = _load_data_from_file(file_path)
@@ -230,3 +265,295 @@ def register_clustering_tools(mcp):
             }
         except Exception as e:
             return {"error": f"DBSCAN clustering failed: {str(e)}"}
+    
+    @mcp.tool()
+    def find_optimal_k(file_path: str, max_k: int = 10) -> Dict[str, Any]:
+        """
+        Calculates clustering Inertia to determine the optimal 'k' for K-Means.
+        
+        HOW TO INTERPRET:
+        - Inertia: Look for the 'Elbow' (where the decrease slows down).
+
+        Args:
+            file_path: Path to the CSV file.
+            max_k: Maximum clusters to test (default 10).
+
+        Returns:
+            Metrics to help decide the number of clusters.
+        """
+        try:
+            data_array = _load_data_from_file(file_path)
+            scaler = StandardScaler()
+            data_scaled = scaler.fit_transform(data_array)
+            
+            results = []
+            k_range = range(2, min(max_k + 1, len(data_array)))
+            
+            for k in k_range:
+                kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                kmeans.fit(data_scaled)
+                inertia = kmeans.inertia_
+                results.append({
+                    "k": k,
+                    "inertia": float(inertia),
+                    "x": k, 
+                    "y": float(inertia),
+                    "source_file": file_path 
+                })
+            os.makedirs('reports', exist_ok=True)
+
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            results_file = f"reports/{base_name}_optimal_k_results.csv"
+            
+            pd.DataFrame(results).to_csv(results_file, index=False)
+            
+            # Save metadata
+            metadata_file = results_file.replace('.csv', '_metadata.txt')
+            with open(metadata_file, 'w') as f:
+                f.write(f"Analysis: Optimal K (Elbow Method)\n")
+                f.write(f"Source file: {file_path}\n")
+                f.write(f"Range: k=2 to {max_k}\n")
+                f.write(f"Note: Plot column 'x' is k, column 'y' is Inertia.\n")
+                
+            return {
+                "success": True,
+                "source_file": file_path,
+                "results_file": os.path.abspath(results_file),
+                "message": "Optimal K analysis finished. Check inertia (lower is better)",
+                "metrics": results
+            }
+        except Exception as e:
+            return {"error": f"Analysis failed: {str(e)}"}
+
+    @mcp.tool()
+    def hierarchical_clustering_single(file_path: str, n_clusters: int = 3) -> Dict[str, Any]:
+        """
+        Perform Hierarchical Clustering using SINGLE Linkage (Minimum distance) on data from a file.
+
+        Single linkage merges clusters based on the minimum distance between any two points in the clusters.
+
+        PROS:
+        - Can detect non-spherical shapes (e.g., crescents, elongated lines, arbitrary shapes)
+        - Excellent for detecting OUTLIERS (they often form their own tiny clusters or remain isolated)
+        - Deterministic (produces the same result every time)
+        - Does not require a random seed
+
+        CONS:
+        - Suffers from the "chaining effect" (clusters can become long, straggly chains)
+        - Sensitive to noise between clusters
+        - Computationally expensive: O(N^2) time and memory complexity
+        - Not suitable for large datasets (> 10k-20k rows)
+
+        BEST USE CASES:
+        - Finding non-convex, irregular cluster shapes
+        - Anomaly detection / outlier isolation
+        - Small to medium-sized datasets
+        - When you suspect the data is connected like a "chain" or "snake"
+
+        AVOID WHEN:
+        - Dataset is large (> 20,000 rows) due to memory crash risk
+        - You want compact, spherical clusters (use K-Means or Complete Linkage instead)
+
+        Args:
+            file_path: Path to CSV file containing the dataset (must be small or a sample).
+            n_clusters: The number of clusters to cut the tree at.
+
+        Returns:
+            Dictionary with cluster labels and algorithm metadata.
+        """
+        try:
+            from sklearn.cluster import AgglomerativeClustering
+            
+            data_array = _load_data_from_file(file_path)
+            
+            # --- SAFETY CHECK: MEMORY LIMIT ---
+            # Hierarchical is O(N^2). 20k rows = 400 million cells in distance matrix.
+            if len(data_array) > 20000:
+                return {
+                    "error": f"Dataset too large for Hierarchical Clustering ({len(data_array)} rows). "
+                             f"Limit is ~20,000 to prevent memory crashes. "
+                             f"Please use the 'downsample_dataset' tool first, or use K-Means."
+                }
+
+            # Standardize the data
+            scaler = StandardScaler()
+            data_scaled = scaler.fit_transform(data_array)
+            
+            # Perform Hierarchical Clustering (Single Linkage)
+            model = AgglomerativeClustering(n_clusters=n_clusters, linkage='single')
+            labels = model.fit_predict(data_scaled)
+            
+            # Calculate cluster statistics
+            unique_labels = np.unique(labels)
+            cluster_stats = {}
+            for label in unique_labels:
+                cluster_points = data_array[labels == label]
+                cluster_stats[int(label)] = {
+                    "size": len(cluster_points),
+                    "center": cluster_points.mean(axis=0).tolist(),
+                    "std_x": float(cluster_points[:, 0].std()),
+                    "std_y": float(cluster_points[:, 1].std())
+                }
+            
+            # Create reports directory if it doesn't exist
+            os.makedirs('reports', exist_ok=True)
+            
+            # Save results to CSV file
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            results_file = f"reports/{base_name}_hierarchical_single.csv"
+            
+            # Create results DataFrame
+            results_df = pd.DataFrame({
+                'point_id': range(len(labels)),
+                'cluster_label': labels,
+                'x': data_array[:, 0],
+                'y': data_array[:, 1],
+                'source_file': file_path,  # <--- CRITICAL for plotting tool
+                'algorithm': 'Hierarchical (Single)'
+            })
+            
+            results_df.to_csv(results_file, index=False)
+            
+            # Save metadata separately (matching K-Means style)
+            metadata_file = results_file.replace('.csv', '_metadata.txt')
+            with open(metadata_file, 'w') as f:
+                f.write(f"Algorithm: Hierarchical Clustering (Single Linkage)\n")
+                f.write(f"Source file: {file_path}\n")
+                f.write(f"Number of clusters: {n_clusters}\n")
+                f.write(f"Algorithm complexity: O(N^2)\n")
+                f.write(f"Efficiency: Low (Memory Intensive)\n")
+                f.write(f"Cluster sizes: {[cluster_stats[i]['size'] for i in range(n_clusters)]}\n")
+                for i in range(n_clusters):
+                    f.write(f"Cluster {i}: size={cluster_stats[i]['size']}, center={cluster_stats[i]['center']}\n")
+            
+            return {
+                "success": True,
+                "algorithm": "Hierarchical (Single Linkage)",
+                "source_file": file_path,
+                "results_file": os.path.abspath(results_file),
+                "n_clusters": n_clusters,
+                "file_size_bytes": os.path.getsize(results_file),
+                "message": f"Hierarchical clustering (Single) completed. Results saved to {results_file}",
+                "summary": {
+                    "clusters_found": n_clusters,
+                    "cluster_sizes": [cluster_stats[i]["size"] for i in range(n_clusters)],
+                    "efficiency": "Low (Memory Intensive)"
+                }
+            }
+        except Exception as e:
+            return {"error": f"Hierarchical clustering failed: {str(e)}"}
+
+    @mcp.tool()
+    def hierarchical_clustering_complete(file_path: str, n_clusters: int = 3) -> Dict[str, Any]:
+        """
+        Perform Hierarchical Clustering using COMPLETE Linkage (Maximum distance) on data from a file.
+
+        Complete linkage merges clusters based on the maximum distance between any two points in the clusters.
+
+        PROS:
+        - Finds compact, roughly spherical clusters of similar size
+        - Avoids the "chaining effect" of single linkage
+        - Deterministic (produces the same result every time)
+        - Often produces more useful hierarchies for general data than single linkage
+
+        CONS:
+        - Sensitive to outliers (an outlier can artificially inflate cluster diameter)
+        - Computationally expensive: O(N^2) time and memory complexity
+        - Not suitable for large datasets (> 10k-20k rows)
+
+        BEST USE CASES:
+        - Finding compact clusters when K-Means is not desired (e.g., need deterministic result)
+        - Small to medium-sized datasets
+        - When you want to ensure all points in a cluster are relatively close to each other
+
+        AVOID WHEN:
+        - Dataset is large (> 20,000 rows) due to memory crash risk
+        - You have very elongated or irregular cluster shapes (use Single Linkage or DBSCAN)
+        - Downsampling may be necessary for large datasets
+
+        Args:
+            file_path: Path to CSV file containing the dataset (must be small or a sample).
+            n_clusters: The number of clusters to cut the tree at.
+
+        Returns:
+            Dictionary with cluster labels and algorithm metadata.
+        """
+        try:
+            from sklearn.cluster import AgglomerativeClustering
+            
+            data_array = _load_data_from_file(file_path)
+            
+            if len(data_array) > 20000:
+                return {
+                    "error": f"Dataset too large for Hierarchical Clustering ({len(data_array)} rows). "
+                             f"Limit is ~20,000 to prevent memory crashes. "
+                             f"Please use the 'downsample_dataset' tool first, or use K-Means."
+                }
+
+            # Standardize the data
+            scaler = StandardScaler()
+            data_scaled = scaler.fit_transform(data_array)
+            
+            # Perform Hierarchical Clustering (Complete Linkage)
+            model = AgglomerativeClustering(n_clusters=n_clusters, linkage='complete')
+            labels = model.fit_predict(data_scaled)
+            
+            # Calculate cluster statistics
+            unique_labels = np.unique(labels)
+            cluster_stats = {}
+            for label in unique_labels:
+                cluster_points = data_array[labels == label]
+                cluster_stats[int(label)] = {
+                    "size": len(cluster_points),
+                    "center": cluster_points.mean(axis=0).tolist(),
+                    "std_x": float(cluster_points[:, 0].std()),
+                    "std_y": float(cluster_points[:, 1].std())
+                }
+            
+            # Create reports directory if it doesn't exist
+            os.makedirs('reports', exist_ok=True)
+            
+            # Save results to CSV file
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            results_file = f"reports/{base_name}_hierarchical_complete.csv"
+            
+            # Create results DataFrame
+            results_df = pd.DataFrame({
+                'point_id': range(len(labels)),
+                'cluster_label': labels,
+                'x': data_array[:, 0],
+                'y': data_array[:, 1],
+                'source_file': file_path,  # <--- CRITICAL for plotting tool
+                'algorithm': 'Hierarchical (Complete)'
+            })
+            
+            results_df.to_csv(results_file, index=False)
+            
+            # Save metadata separately
+            metadata_file = results_file.replace('.csv', '_metadata.txt')
+            with open(metadata_file, 'w') as f:
+                f.write(f"Algorithm: Hierarchical Clustering (Complete Linkage)\n")
+                f.write(f"Source file: {file_path}\n")
+                f.write(f"Number of clusters: {n_clusters}\n")
+                f.write(f"Algorithm complexity: O(N^2)\n")
+                f.write(f"Efficiency: Low (Memory Intensive)\n")
+                f.write(f"Cluster sizes: {[cluster_stats[i]['size'] for i in range(n_clusters)]}\n")
+                for i in range(n_clusters):
+                    f.write(f"Cluster {i}: size={cluster_stats[i]['size']}, center={cluster_stats[i]['center']}\n")
+            
+            return {
+                "success": True,
+                "algorithm": "Hierarchical (Complete Linkage)",
+                "source_file": file_path,
+                "results_file": os.path.abspath(results_file),
+                "n_clusters": n_clusters,
+                "file_size_bytes": os.path.getsize(results_file),
+                "message": f"Hierarchical clustering (Complete) completed. Results saved to {results_file}",
+                "summary": {
+                    "clusters_found": n_clusters,
+                    "cluster_sizes": [cluster_stats[i]["size"] for i in range(n_clusters)],
+                    "efficiency": "Low (Memory Intensive)"
+                }
+            }
+        except Exception as e:
+            return {"error": f"Hierarchical clustering failed: {str(e)}"}

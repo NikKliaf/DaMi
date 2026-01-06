@@ -257,3 +257,52 @@ def register_data_loading_tools(mcp):
             }
         except Exception as e:
             return {"error": f"Failed to list CSV files: {str(e)}"}
+        
+    @mcp.tool()
+    def downsample_dataset(file_path: str, n_samples: int = 5000, random_state: int = 42) -> Dict[str, Any]:
+        """
+        Creates a smaller, random sample of a CSV dataset and saves it as a new file.
+
+        Args:
+            file_path: The path to the original large CSV file.
+            n_samples: The number of rows to keep (default 5000).
+            random_state: Seed for reproducibility.
+
+        Returns:
+            Metadata about the new sampled file (including its new path).
+        """
+        try:            
+            if not os.path.exists(file_path):
+                return {"error": f"File not found: {file_path}"}
+
+            df = pd.read_csv(file_path)
+            
+            total_rows = len(df)
+            
+            if n_samples >= total_rows:
+                return {
+                    "warning": f"Requested samples ({n_samples}) >= total rows ({total_rows}). No sampling needed.",
+                    "file_path": file_path
+                }
+
+            sampled_df = df.sample(n=n_samples, random_state=random_state)
+            
+            directory = os.path.dirname(file_path)
+            filename = os.path.basename(file_path)
+            name, ext = os.path.splitext(filename)
+            new_filename = f"{name}_sampled_{n_samples}{ext}"
+            new_file_path = os.path.join(directory, new_filename)
+            
+            sampled_df.to_csv(new_file_path, index=False)
+            
+            return {
+                "success": True,
+                "original_file": file_path,
+                "new_file_path": new_file_path,
+                "original_size": total_rows,
+                "new_size": n_samples,
+                "message": f"Successfully created sampled dataset at {new_file_path}"
+            }
+
+        except Exception as e:
+            return {"error": f"Downsampling failed: {str(e)}"}
